@@ -1,0 +1,105 @@
+# Starter pipeline
+# Start with a minimal pipeline that you can customize to build and deploy your code.
+# Add steps that build, run tests, deploy, and more:
+# https://aka.ms/yaml
+
+trigger:
+- main
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - group: azconnect
+  
+stages:
+- stage: 'Build'
+  displayName: 'Build Package'
+  jobs: 
+  - job: 'Build'
+    displayName: 'Build job'
+    steps:
+    - task: UseNode@1
+      inputs:
+        version: '18.x'
+      displayName: 'Install Node.js'
+
+    - script: |
+        npm install
+      displayName: 'npm install'
+
+    - script: |
+        npm run build
+      displayName: 'npm build'
+   
+    - task: ArchiveFiles@2
+      inputs:
+        rootFolderOrFile: '$(Build.SourcesDirectory)' # All the files after running the build
+        includeRootFolder: false
+        archiveType: 'zip'
+        archiveFile: '$(Build.ArtifactStagingDirectory)/dist.zip' # Define the path for the zip file
+        replaceExistingArchive: true
+      displayName: 'Archive Artifact'  
+
+    - task: CopyFiles@2
+      inputs:
+        SourceFolder: '$(Build.ArtifactStagingDirectory)'
+        Contents: '**/*.zip' # Assuming you want to copy all zip files
+        TargetFolder: '$(Build.ArtifactStagingDirectory)/drop'
+      displayName: 'Copy Artifact'
+
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)/drop'
+        ArtifactName: 'drop'        
+      displayName: 'Publish Artifact: drop'
+
+    - publish: Templates
+      artifact: Templates
+      displayName: 'Publish Pipeline Artifact: ARM Templates'
+
+- stage: 'Environment'
+  displayName: 'Setup environment'
+  dependsOn: Build
+  condition:  succeeded()
+  jobs:
+    - job: 'DevEnv'
+      displayName: 'Dev Environment'
+      steps:
+        - download: current
+          artifact: Templates
+          displayName: 'Download Pipeline Artifact: ARM Templates'
+        - task: AzureResourceManagerTemplateDeployment@3
+          inputs:
+            deploymentScope: 'Resource Group'
+            azureResourceManagerConnection: '$(dev-connect-name)'
+            subscriptionId: '$(dev-connect-id)'
+            action: 'Create Or Update Resource Group'
+            resourceGroupName: '$(dev-rg-name)'
+            location: 'Australia East'
+            templateLocation: 'Linked artifact'
+            csmFile: '$(Pipeline.Workspace)/Templates/functionapp.json'
+            csmParametersFile: '$(Pipeline.Workspace)/Templates/functionapp.parameters.json'
+            deploymentMode: 'Incremental'
+
+- stage: 'Deploy'
+  displayName: 'Deploy to environment'
+  dependsOn: Environment
+  condition:  succeeded()
+  jobs:
+    - job: 'DevDeploy'
+      displayName: 'Dev Deployment'
+      steps:
+      - task: DownloadBuildArtifacts@0
+        inputs:
+          buildType: 'current'
+          downloadType: 'single'
+          artifactName: 'drop'
+          downloadPath: '$(System.ArtifactsDirectory)'
+      - task: AzureFunctionApp@2
+        inputs:
+          connectedServiceNameARM: '$(dev-connect-name)'
+          appType: 'functionApp'
+          appName: 'RBTypeScriptProj'
+          package: '$(System.ArtifactsDirectory)/drop/*.zip'
+          deploymentMethod: 'auto'
